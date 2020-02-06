@@ -1,9 +1,6 @@
 
-import io.netty.resolver.dns.DnsCache;
 import org.apache.spark.api.java.*;
 import org.apache.spark.api.java.function.*;
-import scala.Array;
-import scala.Int;
 import scala.Tuple2;
 
 import java.util.ArrayList;
@@ -12,7 +9,6 @@ import java.util.Iterator;
 import java.util.List;
 
 import static java.lang.Integer.parseInt;
-import static java.lang.Integer.rotateRight;
 
 public class Spark1 {
     public static void main(String[] args) {
@@ -24,7 +20,8 @@ public class Spark1 {
 
         JavaPairRDD<Integer, ArrayList<Integer>> links = getFormattedLinks(linkPath, sc).cache();
         JavaPairRDD<Integer, String> titles = getFormattedTitles(titlesPath, sc).cache();
-        JavaPairRDD<Integer, ArrayList<Integer>> isLinkedToo = getIsLinkedToo(links, sc);
+        JavaPairRDD<Integer, ArrayList<Integer>> isLinkedToo = getIsLinkedToo(links, sc).cache();
+        isLinkedToo.saveAsTextFile("/output/LinkedToo");
 
         String query = "a";
 //        while (!query.equals("QUIT")) {
@@ -36,10 +33,10 @@ public class Spark1 {
         rootSet.saveAsTextFile("/output/RootSet");
         JavaRDD<Integer> baseSet = getBaseSet(rootSet, links, sc);
         baseSet.saveAsTextFile("/output/BaseSet");
-        computeAuthAndHubScores(baseSet, links, titles, sc);
+        computeAuthAndHubScores(baseSet, links, isLinkedToo, titles, sc);
     }
 
-    //TODO: REWRITE THIS
+
     private static JavaPairRDD<Integer, ArrayList<Integer>> getIsLinkedToo(JavaPairRDD<Integer, ArrayList<Integer>> links, JavaSparkContext sc) {
         JavaPairRDD<Integer, Integer> temp = links.flatMapToPair(
                 new PairFlatMapFunction<Tuple2<Integer, ArrayList<Integer>>, Integer, Integer>() {
@@ -52,8 +49,17 @@ public class Spark1 {
                     }
                 }
         );
-        temp.groupByKey()
-      return links;
+        return temp.groupByKey().mapToPair(
+                new PairFunction<Tuple2<Integer, Iterable<Integer>>, Integer, ArrayList<Integer>>() {
+                    @Override
+                    public Tuple2<Integer, ArrayList<Integer>> call(Tuple2<Integer, Iterable<Integer>> entry) {
+                        ArrayList<Integer> temp = new ArrayList<Integer>();
+                        for (int i : entry._2) {
+                            temp.add(i);
+                        }
+                        return new Tuple2<Integer, ArrayList<Integer>>(entry._1, temp);
+                    }
+                });
     }
 
 
@@ -137,7 +143,7 @@ public class Spark1 {
         return rootSetNums.union(rootSetPointsTo).union(linksToRootSet).distinct();
     }
 
-    private static void computeAuthAndHubScores(JavaRDD<Integer> baseSet, JavaPairRDD<Integer, ArrayList<Integer>> links, JavaPairRDD<Integer, String> titles, JavaSparkContext sc) {
+    private static void computeAuthAndHubScores(JavaRDD<Integer> baseSet, JavaPairRDD<Integer, ArrayList<Integer>> links, JavaPairRDD<Integer, ArrayList<Integer>> isLinkedToo, JavaPairRDD<Integer, String> titles, JavaSparkContext sc) {
 
         JavaPairRDD<Integer, Double> auths = baseSet.mapToPair(
                 new PairFunction<Integer, Integer, Double>() {
@@ -148,34 +154,65 @@ public class Spark1 {
         );
         JavaPairRDD<Integer, Double> hubs = auths;
 
-        //auths = iterateAuths(auths);
+        //auths = iterateAuths(hubs, isLinkedToo);
+        hubs = iterateHubs(auths, links);
+        hubs.saveAsTextFile("/output/Temp");
+
     }
 
-//    private static JavaPairRDD<Integer, Double> iterateAuths(JavaPairRDD<Integer, Double> auths) {
+//    private static JavaPairRDD<Integer, Double> iterateAuths(JavaPairRDD<Integer, Double> hubs, JavaPairRDD<Integer, ArrayList<Integer>> isLinkedToo) {
 //    }
 
+    private static JavaPairRDD<Integer, Double> iterateHubs(JavaPairRDD<Integer, Double> auths, JavaPairRDD<Integer, ArrayList<Integer>> links) {
+        JavaPairRDD<Integer, Double> scores = links.flatMapToPair(
+                new PairFlatMapFunction<Tuple2<Integer, ArrayList<Integer>>, Integer, Integer>() {
+                    public Iterator<Tuple2<Integer, Integer>> call(Tuple2<Integer, ArrayList<Integer>> entry) {
+                        ArrayList<Tuple2<Integer, Integer>> results = new ArrayList<Tuple2<Integer, Integer>>();
+                        for (int i : entry._2()) {
+                            results.add(new Tuple2<Integer, Integer>(i, entry._1));
+                        }
+                        return results.iterator();
+                    }
+                }
+        ).join(auths).mapToPair(
+                new PairFunction<Tuple2<Integer, Tuple2<Integer, Double>>, Integer, Double>() {
+                    public Tuple2<Integer, Double> call(Tuple2<Integer, Tuple2<Integer, Double>> entry) {
+                        return new Tuple2<Integer, Double>(entry._2._1, entry._2._2);
+                    }
+                }).reduceByKey(
+                new Function2<Double, Double, Double>() {
+                    @Override
+                    public Double call(Double aDouble, Double aDouble2) throws Exception {
+                        return aDouble + aDouble2;
+                    }
+                }
+        );
 
+        return normalize(scores);
+
+    }
+
+    private static JavaPairRDD<Integer, Double> normalize(JavaPairRDD<Integer, Double> scores) {
+        Double sum = scores.map(
+                new Function<Tuple2<Integer, Double>, Double>() {
+                    public Double call(Tuple2<Integer, Double> entry) {
+                        return entry._2;
+                    }
+                }
+        ).reduce(
+                new Function2<Double, Double, Double>() {
+                    @Override
+                    public Double call(Double aDouble, Double aDouble2) {
+                        return aDouble + aDouble2;
+                    }
+                }
+        );
+        return scores.mapToPair(
+                new PairFunction<Tuple2<Integer, Double>, Integer, Double>() {
+                    public Tuple2<Integer, Double> call(Tuple2<Integer, Double> entry) {
+                        return new Tuple2<Integer, Double>(entry._1, entry._2 / sum);
+                    }
+                }
+        );
+    }
 }
-
-
-//        String inFile = args[0]; // Should be some file on your system
-//        JavaSparkContext sc = new JavaSparkContext("yarn", "Spark1",
-//                "$SPARK_HOME", new String[]{"target/Spark1-1.0.jar"});
-//        JavaRDD<String> logData = sc.textFile(inFile).cache();
-//
-//        long numAs = logData.filter(new Function<String, Boolean>() {
-//            public Boolean call(String s) {
-//                return s.contains("a");
-//            }
-//        }).count();
-//
-//        long numBs = logData.filter(new Function<String, Boolean>() {
-//            public Boolean call(String s) {
-//                return s.contains("b");
-//            }
-//        }).count();
-//
-//        System.out.println("Lines with a: " + numAs + ", lines with b: " + numBs);
-//
-//        logData.saveAsTextFile(args[1]);
-//        sc.stop();
