@@ -6,7 +6,7 @@
     <groupId>com.mai/artifactId>
         <version>1.0</version>
         n</groupId>
-    <artifactId>Spark1<
+    <artifactId>Spark1</artifactId>
     <!-- library dependencies -->
     <dependencies>
         <dependency>
